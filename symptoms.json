@@ -1,0 +1,210 @@
+{
+  "$comment": "鸿蒙内嵌 Node.js 的症状索引。每条含：精确报错（便于搜索匹配）、真因、修法、验证方式、证据强度。本文件可供工具消费；内容对应 harmonyos-node-notes 与 ohos-node-doctor。",
+  "version": "1.0.0",
+  "platform": { "os": "HarmonyOS / OpenHarmony", "arch": "arm64", "api": 26, "verifiedNode": "v24.2.0" },
+  "evidenceLevels": {
+    "verified": "真机实测，有原始输出或产物证据",
+    "observed": "真机观察到现象，机理为推断",
+    "documented": "来自官方文档或其他项目的公开记录"
+  },
+  "symptoms": [
+    {
+      "id": "pt-interp-pie-crash",
+      "error": "dlopen 成功但立刻崩溃；或 V8 报 Check failed: AllowHeapAllocationInRelease",
+      "searchTerms": ["libnode.so PT_INTERP", "dlopen PIE 崩溃", "V8 第一次堆分配崩溃", "ET_DYN PT_INTERP"],
+      "cause": "libnode.so 是 PIE 可执行文件（ET_DYN 且带 PT_INTERP）。dlopen 一个 PIE 会把 local-exec 的 %fs TLS 别名到宿主进程的 TLS 块，V8 的 thread_local current_per_thread_assert_data 读到垃圾，release 版 CHECK 在 Isolate::Initialize 第一次堆分配就触发。",
+      "fix": "换用 --shared 构建的真共享库（PIC + 动态 TLS + SONAME）。下载后必须校验 ELF。",
+      "verify": "llvm-readelf -h libnode.so | grep -E 'Type|Machine'   # 期望 Type: DYN\nllvm-readelf -l libnode.so | grep -c INTERP           # 期望 0",
+      "evidence": "verified"
+    },
+    {
+      "id": "libcxx-missing-silent-undefined",
+      "error": "dlopen 失败但 ArkTS 侧不报错，只拿到 undefined",
+      "searchTerms": ["libc++_shared.so 缺失", "dlopen undefined", "ArkTS 原生模块 undefined", "NAPI 模块 undefined"],
+      "cause": "libnode.so 的 DT_NEEDED 声明了 libc++_shared.so，但它没有一起打进 HAP。dlopen 失败，而 ArkTS 侧的类型声明路径把它吞成了 undefined。",
+      "fix": "从 NDK 取 native/llvm/lib/aarch64-linux-ohos/libc++_shared.so，与 libnode.so 放在同一 ABI 目录并一起打进 HAP。",
+      "verify": "llvm-readelf -d libnode.so | grep NEEDED   # 对照 entry/libs/<abi>/ 目录内容",
+      "evidence": "verified"
+    },
+    {
+      "id": "argc-sentinel-segfault",
+      "error": "node::Start 内 5 毫秒内段错误（无堆栈）",
+      "searchTerms": ["node::Start 段错误", "argc argv 哨兵", "node Start segfault openharmony", "argv nullptr"],
+      "cause": "argv 末尾压了一个 nullptr 哨兵，argc 把它算进去了。Node 拿到 NULL 参数后在极短时间内崩溃。",
+      "fix": "argc = argv.size() - 1，排除末尾哨兵。",
+      "verify": "逐个打印 argv[i]，看到 argv[N]=(null) 就说明多算了一个",
+      "evidence": "verified"
+    },
+    {
+      "id": "sigsys-io-uring",
+      "error": "libuv 在 loop init 阶段崩溃（V8 尚未介入）",
+      "searchTerms": ["io_uring_setup seccomp", "libuv loop init 崩溃", "SIGSYS shim", "UV_USE_IO_URING"],
+      "cause": "libuv 初始化时无条件探测 io_uring_setup(425)，鸿蒙沙箱 seccomp 会 trap 它。",
+      "fix": "装 SIGSYS handler 把 trap 转成【正好 -1】（不是 -ENOSYS，libuv 的守卫才认）；同时 setenv UV_USE_IO_URING=0，且必须在 libuv 初始化之前设置。",
+      "verify": "启动日志里能看到 SIGSYS 处理记录；设定 UV_USE_IO_URING 后 loop init 通过",
+      "evidence": "verified"
+    },
+    {
+      "id": "app-input-block-anr",
+      "error": "启动即 ANR：APP_INPUT_BLOCK",
+      "searchTerms": ["APP_INPUT_BLOCK", "鸿蒙 ANR dlopen", "UI 线程阻塞 ANR", "node::Start ANR"],
+      "cause": "dlopen/node::Start 跑在 ArkTS UI 线程，阻塞超过看门狗阈值。",
+      "fix": "在 detached 线程里做 dlopen + node::Start。",
+      "verify": "应用启动不再触发 APP_INPUT_BLOCK",
+      "evidence": "verified"
+    },
+    {
+      "id": "expose-internals-module-not-found",
+      "error": "internal/modules/* 全部 MODULE_NOT_FOUND",
+      "searchTerms": ["internal/modules MODULE_NOT_FOUND", "expose-internals 必需", "require internal/ 失败", "require-builtin 桩"],
+      "cause": "启动参数缺 --expose-internals。require('internal/...') 只认 process.execArgv。",
+      "fix": "启动加 --expose-internals，并用约 20 行纯 JS 桩替代原生 require-builtin 插件。",
+      "verify": "带 flag：5 个内部模块 13/13 通过；不带：5/5 MODULE_NOT_FOUND。打印 process.execArgv 确认 flag 真的在。",
+      "evidence": "verified"
+    },
+    {
+      "id": "writer-reader-mismatch",
+      "error": "解包出来的文件 Node 报 MODULE_NOT_FOUND（同目录、同进程、同 uid）",
+      "searchTerms": ["谁写谁读 鸿蒙", "解包文件 Node 读不到", "decompressFile Node 读不到", "bootstrap 自解包"],
+      "cause": "同一沙箱目录下『谁写的文件谁能读』不成立：ArkTS 用 fs.writeSync 写的文件 Node 能读，而鸿蒙 zlib.decompressFile 解出来的文件 Node 读不到。",
+      "fix": "让最终使用者也当写入者：把载荷打成单个 tar.gz，由端上脚本用 Node 自己的 zlib + fs 解包。",
+      "verify": "解包后立刻用 fs.readFileSync 读入口文件，成功即证明「谁写谁读」",
+      "evidence": "verified"
+    },
+    {
+      "id": "import-meta-main-never-runs",
+      "error": "入口『已加载』之后进程立刻退出（无任何报错）",
+      "searchTerms": ["import.meta.main false", "import() 加载 CLI 不执行", "runCli 不跑", "动态 import 入口退出"],
+      "cause": "入口若是包 CLI，最后一行常是 if (import.meta.main) runCli()。用 import() 加载时 import.meta.main 恒为 false，runCli 永不执行。",
+      "fix": "显式调用入口导出的 runCli()（或 main()），并把 process.argv 摆成它期望的形状。",
+      "verify": "入口加载后打印 typeof mod.runCli，确认存在并显式调用",
+      "evidence": "verified"
+    },
+    {
+      "id": "flock-unsupported",
+      "error": "flock is not supported on openharmony-arm64",
+      "searchTerms": ["flock is not supported on openharmony-arm64", "鸿蒙 flock", "lockfile 鸿蒙", "单实例互斥 鸿蒙"],
+      "cause": "鸿蒙不提供 flock(2)。大量 Node 生态用 lockfile + flock 做单实例互斥。",
+      "fix": "单进程场景下视为『总是获取成功』。先问『这个锁在鸿蒙的进程模型下还要不要』，再决定替换还是退化。",
+      "verify": "包装 flock 使 process.platform === 'openharmony' 时直接返回 true",
+      "evidence": "verified"
+    },
+    {
+      "id": "eacces-hardlink",
+      "error": "EACCES: permission denied, link '/data/.../x.tmp' -> '/data/.../x.final'",
+      "searchTerms": ["EACCES permission denied link", "鸿蒙 硬链接", "link(2) 被拒", "原子发布 鸿蒙"],
+      "cause": "鸿蒙不提供 link(2)。Node 生态常用『写临时文件 + link 发布』实现原子写入与独占创建。",
+      "fix": "需独占语义 → open(dst,'wx') 保住建 EEXIST 语义；已确认目标不存在 → rename。不可简单退化成『写两次』，那会把独占变成覆盖。",
+      "verify": "对已存在的目标调用 open(dst,'wx') 应抛 EEXIST",
+      "evidence": "verified"
+    },
+    {
+      "id": "spawn-eacces",
+      "error": "spawnSync 返回 EACCES（而 /bin/sh 明明存在）",
+      "searchTerms": ["spawnSync EACCES 鸿蒙", "鸿蒙 不能执行外部程序", "ripgrep 鸿蒙", "glob grep 不可用"],
+      "cause": "seccomp 禁止 app 执行任何外部程序。/bin/sh 与 /system/bin/sh 都存在，所以『检查文件是否存在』这个判据会误导。",
+      "fix": "用纯 JS 复刻该 CLI 与调用方之间的输出契约（而非复刻整个工具）。判据要改成『执行一下看 EACCES』。",
+      "verify": "spawnSync('/bin/sh', ['-c','echo x']) 返回 EACCES",
+      "evidence": "verified"
+    },
+    {
+      "id": "opendir-eperm-homedir",
+      "error": "EPERM: opendir '/storage/Users/currentUser'",
+      "searchTerms": ["EPERM opendir currentUser", "鸿蒙 os.homedir", "文件选择器 EPERM", "沙箱外目录不可读"],
+      "cause": "Node 的 os.homedir() 读 $HOME，而鸿蒙 App 读不到沙箱外的用户主目录。框架的文件选择器默认从 homedir 开始。",
+      "fix": "在宿主壳里 setenv('HOME', <沙箱内可读目录>)，并用 dataDir 的父目录。",
+      "verify": "端上打印 process.env.HOME，确认落在沙箱内且可 opendir",
+      "evidence": "verified"
+    },
+    {
+      "id": "code-801",
+      "error": "Capability not support. (code=801)",
+      "searchTerms": ["Capability not support code=801", "鸿蒙 801", "childProcessManager 801", "getUserDownloadDir 801"],
+      "cause": "该 API 在『这台设备』上未实现。SDK 声明里存在不等于设备支持。",
+      "fix": "换设备试或换条路；不要改代码。801 在本项目里含义统一：不受支持。",
+      "verify": "真机调一次该 API，看返回码",
+      "evidence": "verified"
+    },
+    {
+      "id": "code-9800005",
+      "error": "9800005 Continuous Task verification failed. Current device can not request continuous tasks of the TASK_KEEPING type.",
+      "searchTerms": ["9800005", "TASK_KEEPING 不支持", "鸿蒙 长时任务 失败", "后台常驻 鸿蒙"],
+      "cause": "该设备不支持 TASK_KEEPING 类型的长时任务。",
+      "fix": "换类型或放弃无限常驻；普通应用在鸿蒙上无法无限后台常驻。",
+      "verify": "startBackgroundRunning(ctx, TASK_KEEPING, agent) 的返回码",
+      "evidence": "verified"
+    },
+    {
+      "id": "code-9900002",
+      "error": "9900002 Transient task verification failed. Request is not allow after the preset time of entering background.",
+      "searchTerms": ["9900002", "进后台后申请长时任务", "Transient task verification failed", "鸿蒙 后台 时机"],
+      "cause": "进入后台超过预设时间后，不允许再申请长时任务。",
+      "fix": "必须在【进入后台之前】申请。requestSuspendDelay 可把可用时间从约 90 秒延长到 3~4 分钟。",
+      "verify": "在进入后台前调用 startBackgroundRunning，对比返回码",
+      "evidence": "verified"
+    },
+    {
+      "id": "arkts-no-any-unknown",
+      "error": "arkts-no-any-unknown（编译期）",
+      "searchTerms": ["arkts-no-any-unknown", "ArkTS 原生模块类型", "import so 类型", "oh-package file 依赖"],
+      "cause": "原生模块类型没接上。用 file: 依赖 + types 包时，ets-loader 会把 import ... from 'x.so' 编译成包内相对模块，运行时解析成 undefined。",
+      "fix": "用环境声明（declare module 'x.so'）提供类型；或在 oh-package.json5 加 file: 依赖并跑一次 ohpm install。",
+      "verify": "ark_disasm modules.abc out.pa 后 grep requireNapi，确认编译成了原生导入",
+      "evidence": "verified"
+    },
+    {
+      "id": "hap-no-libs-dir",
+      "error": "HAP 里没有 libs/ 目录（装上但功能不通）",
+      "searchTerms": ["HAP 没有 libs", "native 产物落在 build", "CMAKE_LIBRARY_OUTPUT_DIRECTORY", "鸿蒙 so 不打包"],
+      "cause": "CMake 没设输出目录，native 产物落在 build/ 下。",
+      "fix": "CMakeLists 里设 CMAKE_LIBRARY_OUTPUT_DIRECTORY 指向 entry/libs/<abi>/。",
+      "verify": "解压 HAP 看是否存在 libs/arm64-v8a/*.so",
+      "evidence": "verified"
+    },
+    {
+      "id": "compress-native-libs-position",
+      "error": "Schema validate failed（想开 compressNativeLibs 但找不到位置）",
+      "searchTerms": ["compressNativeLibs 位置", "Schema validate failed 鸿蒙", "HAP 体积 压缩 so", "module.json5 compressNativeLibs"],
+      "cause": "compressNativeLibs 是 module.json5 的 module 级属性。写进 build-profile.json5 的 buildOption 或 buildOption.nativeLib 都会被 schema 拒绝，且 schema 只报『哪个键不对』，不报『该写到哪』。",
+      "fix": "写在 entry/src/main/module.json5 的 module 级。实测 HAP 从 151.6 MB 降到 71.8 MB（libnode.so 120.9 → 43.0 MB）。",
+      "verify": "python -c \"import zipfile; z=zipfile.ZipFile('x.hap'); print([(i.filename,i.compress_type) for i in z.infolist() if i.filename.endswith('.so')])\"  # compress_type 应为 8(DEFLATE)",
+      "evidence": "verified"
+    },
+    {
+      "id": "elf-codesign-missing",
+      "error": "商用机上 .so 装上也用不了（开发机无感）",
+      "searchTerms": ["鸿蒙 so 签名", "codesign section", "binary-sign-tool", "ELF 代码签名校验"],
+      "cause": "鸿蒙商用版对 ELF 做代码签名校验，没有 .codesign section 的库直接不可用。",
+      "fix": "用 OHOS 工具链的 binary-sign-tool 自签，注意要在 strip 之后签。",
+      "verify": "llvm-readelf -S libnode.so | grep -i codesign",
+      "evidence": "documented"
+    },
+    {
+      "id": "sandbox-logs-unreadable",
+      "error": "hdc 读沙箱日志报 permission denied（连 debug 签名也不行）",
+      "searchTerms": ["hdc 读日志 permission denied", "鸿蒙 沙箱日志", "debug 签名 日志", "hilog 看不到日志"],
+      "cause": "应用沙箱内的日志文件不允许 hdc（以 shell 身份）读取。应用侧 INFO 日志也常不进 hilog dump 缓冲。",
+      "fix": "搭四条通道：① snapshot_display 截图；② uitest uiInput 点按；③ 端上 HTTP POST 回传日志（hdc rport）；④ hdc fport + curl 做端到端验证。native 侧关键信息必须同时打 hilog。",
+      "verify": "hdc shell snapshot_display -f /data/local/tmp/s.jpeg && hdc file recv /data/local/tmp/s.jpeg ./",
+      "evidence": "verified"
+    },
+    {
+      "id": "proxy-network-asymmetry",
+      "error": "git push 长时间无进展，但 git ls-remote 只要 1.5 秒",
+      "searchTerms": ["git push 卡住 github", "ls-remote 快 push 慢", "github 推送超时", "Contents API 上传"],
+      "cause": "上行带宽或代理改写导致 git 协议推送不稳。全局 url.<proxy>.insteadOf 还会把 origin 的读取结果也改写成代理地址。",
+      "fix": "改用 GitHub Contents API（普通 HTTPS POST）逐文件上传；注意 Contents API 拒绝写入 .github/ 下的路径，需用 Git Data API。",
+      "verify": "git remote get-url origin 是否被改写成代理地址；改用 API 后上传成功",
+      "evidence": "verified"
+    },
+    {
+      "id": "ci-per-file-push-false-failure",
+      "error": "CI 报告失败，但最新几次其实是成功的",
+      "searchTerms": ["GitHub Actions 误报失败", "逐文件推送 CI 失败", "通知不等于当前状态"],
+      "cause": "逐个文件上传会产生多个提交，早期提交缺少 CI 需要的文件，于是必然失败并产生『Run failed』通知。",
+      "fix": "判定 CI 健康要看最近若干次运行，而不是未读通知。用 Git Data API 一次提交全部文件可避免。",
+      "verify": "GET /repos/{owner}/{repo}/actions/runs 看最近 10 次的 conclusion",
+      "evidence": "verified"
+    }
+  ]
+}
