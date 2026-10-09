@@ -1,0 +1,24 @@
+# 许可协议 / License
+
+## 文章内容（`docs/` 与 `README.md`）
+
+采用 **Creative Commons Attribution 4.0 International (CC BY 4.0)**。
+
+你可以自由地：
+- **共享** —— 以任何媒介或格式复制、发行本文
+- **改编** —— 重混、转换本文，甚至用于商业目的
+
+惟须遵守：
+- **署名** —— 必须注明出处（本仓库链接）与是否做了修改
+
+完整条款：https://creativecommons.org/licenses/by/4.0/legalcode
+
+## 代码片段
+
+文中出现的所有代码片段采用 **MIT**，可任意使用，无需署名。
+
+## 免责
+
+- 文中结论基于**特定设备与版本**的实测（HarmonyOS / OpenHarmony，arm64，API 26）。
+  鸿蒙 API 与行为随版本变化，**请以你的目标机型实测为准**。
+- 不提供任何形式的保证。
