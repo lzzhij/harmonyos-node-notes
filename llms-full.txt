@@ -1,0 +1,262 @@
+# 鸿蒙内嵌 Node.js 实战笔记 —— 完整内容（单文件版）
+
+> 本文件把全部技术结论内联，便于 AI 系统一次性读取，无需逐页抓取。
+> 索引版见 llms.txt；按报错组织的排障表见 TROUBLESHOOTING.md；机器可读索引见 symptoms.json。
+>
+> 平台：HarmonyOS / OpenHarmony · arm64 · API 26 · 真机验证 · Node v24.2.0 在 App 进程内运行成功
+> 许可：文章 CC BY 4.0，代码片段 MIT
+> 引用：见 CITATION.cff
+
+---
+
+## 0. 这件事是什么
+
+在 OpenHarmony App 的**进程内**运行真正的 Node.js 运行时：
+用 NAPI 宿主壳 `dlopen` 一个 `--shared` 构建的 `libnode.so`，再调用 `node::Start`。
+UI 用 ArkWeb 加载端上 Node 提供的 HTTP 服务。
+
+真机验证到的运行时事实：
+
+```json
+{ "node": "v24.2.0", "platform": "openharmony", "arch": "arm64",
+  "execArgv": ["--expose-internals", "--jitless", "--no-verify-heap"] }
+```
+
+**关键前提**：这些结论来自**特定设备与版本**（arm64 / API 26），
+不构成对其他机型或版本的保证。
+
+---
+
+## 1. 六条硬约束（违反任何一条，症状都不是报错）
+
+### 1.1 `libnode.so` 必须是真共享库（`ET_DYN` 且无 `PT_INTERP`）
+
+若误用 PIE 版本（`ET_DYN` 但带 `PT_INTERP`），`dlopen` 会把 local-exec 的 `%fs` TLS
+别名到宿主进程的 TLS 块，V8 的 `thread_local current_per_thread_assert_data` 读到垃圾，
+release 版 `CHECK AllowHeapAllocationInRelease` 在 `Isolate::Initialize`
+**第一次堆分配就崩**。
+
+校验：
+
+```bash
+llvm-readelf -h libnode.so | grep -E 'Type|Machine'   # 期望 Type: DYN
+llvm-readelf -l libnode.so | grep -c INTERP           # 期望 0
+```
+
+### 1.2 `libc++_shared.so` 必须一起打包
+
+漏掉它的症状**不是报错**：`dlopen` 失败，而 ArkTS 侧只拿到 `undefined`。
+容易误判成"类型声明没接上"。从 NDK 取
+`native/llvm/lib/aarch64-linux-ohos/libc++_shared.so`，与 `libnode.so` 放同一 ABI 目录。
+
+### 1.3 `argc` 必须排除 `argv` 末尾的 `nullptr` 哨兵
+
+多算一个 ⇒ Node 拿到 `NULL` 参数 ⇒ **5 毫秒内段错误**。
+判据：逐个打印 `argv[i]`，看到 `argv[N]=(null)` 即为多算。
+
+### 1.4 libuv 的 `io_uring_setup` 探测被 seccomp trap
+
+libuv 初始化时**无条件**探测 `io_uring_setup(425)`，鸿蒙沙箱 seccomp 会 trap 它。
+处理：装 SIGSYS handler 把 trap 转成**正好 `-1`**（不是 `-ENOSYS`，libuv 的守卫才认），
+并 `setenv("UV_USE_IO_URING","0",1)`，且必须在 libuv 初始化**之前**。
+
+### 1.5 `require('internal/...')` 只认 `process.execArgv`
+
+`--expose-internals` 不在 `NODE_OPTIONS` 白名单里，必须出现在**启动参数**中。
+
+对照实测：
+
+| 实验 | 结果 |
+|---|---|
+| 带 flag + 约 20 行纯 JS 桩 | 5 个内部模块 **13/13 通过** |
+| 不带 flag | **5/5 `MODULE_NOT_FOUND`** |
+
+涉及模块：`internal/modules/{esm/loader,cjs/loader,helpers,esm/utils,esm/resolve}`。
+
+纯 JS 桩替代原生 `require-builtin` 插件：
+
+```js
+module.exports = {
+  requireBuiltin: (id) => require(id),
+  isAllowedInternalId: () => true,
+};
+```
+
+**推论**：这可以完全免掉原生插件移植。
+
+### 1.6 同一进程内 `node::Start` 只能调用一次
+
+第二次会命中源码断言。⇒ 不要设计"进程内自动重启"。
+
+---
+
+## 2. 设备能力：三个错误码的实测取证
+
+| 调用 | 设备返回原文 |
+|---|---|
+| `childProcessManager.startArkChildProcess` | `Capability not support. (code=801)`，且 hilog 中**没有子进程入口日志** |
+| `startBackgroundRunning(ctx, TASK_KEEPING, agent)` | `9800005 Continuous Task verification failed. Current device can not request continuous tasks of the TASK_KEEPING type.` |
+| `startBackgroundRunning(ctx, DATA_TRANSFER, agent)`（进后台后申请） | `9900002 Transient task verification failed. Request is not allow after the preset time of entering background.` |
+
+**规律**：`801` 在本项目中出现多次（`getUserDownloadDir` / `getUserDocumentDir` /
+权限申请 `authResults=[2,2]`），含义统一是**该 API 在本设备上不受支持**。
+
+> **SDK 声明文件里有，不等于设备可用 —— 必须真机试一次才能定论。**
+
+`9900002` 还给出一条**时机约束**：长时任务必须在**进入后台之前**申请。
+`requestSuspendDelay` 可用，把切后台后的可用时间从约 90 秒延长到 **3~4 分钟**。
+
+---
+
+## 3. 与 Linux 行为不同的 syscall 及其等价替代
+
+| 能力 | 鸿蒙上的现象 | 等价替代 |
+|---|---|---|
+| `flock(2)` | `flock is not supported on openharmony-arm64` | 单进程场景**视为总是成功** |
+| `link(2)` | `EACCES: permission denied, link '...tmp' -> '...final'` | 需独占 → `open(dst,'wx')`；已确认不存在 → `rename` |
+| spawn 外部程序 | `spawnSync` → `EACCES`（`/bin/sh` 存在但不可执行） | 用**纯 JS 复刻**该 CLI 的输出契约 |
+| `os.homedir()` | `EPERM: opendir '/storage/Users/currentUser'` | 宿主壳里 `setenv("HOME", <沙箱内目录>)` |
+
+**`link(2)` 的关键细节**：Node 生态常用 `link` 实现**原子发布 + 独占创建**
+（靠 `EEXIST` 语义）。此时**不能简单退化成"写两次"** —— 那会把"独占"变成"后者覆盖前者"。
+`open(dst,'wx')` 才能保住 `EEXIST` 语义。
+
+```js
+async function publishExclusive(tmpPath, dstPath) {
+  try { await link(tmpPath, dstPath); return; }
+  catch (e) {
+    if (e.code !== 'EACCES' && e.code !== 'EPERM' && e.code !== 'ENOSYS') throw e;
+  }
+  const fh = await open(dstPath, 'wx');          // 目标存在则 EEXIST，与 link 语义一致
+  try { await fh.writeFile(await readFile(tmpPath)); } finally { await fh.close(); }
+}
+```
+
+---
+
+## 4. 文件读写：一条最反直觉的规律
+
+**同一沙箱目录、同一进程、同一 uid 下，"谁写的文件谁能读"并不成立。**
+
+| 写入者 | Node 能否 `require` |
+|---|---|
+| ArkTS `fs.writeSync` | ✅ 能 |
+| 鸿蒙 `zlib.decompressFile` | ❌ **不能**（`MODULE_NOT_FOUND`，`requireStack: []`，但 ArkTS 侧 `statSync` 看到 11237 字节） |
+
+**正解：让最终使用者也当写入者。** 把载荷打成单个 `tar.gz` 放 `rawfile/`，
+由端上脚本用 **Node 自己的 `zlib` + `fs`** 解包（约 30 行纯 JS）。
+
+**为什么用 tar 不用 zip**：tar 只需解析 512 字节头；zip 需要中央目录与 deflate 分支。
+Node 内置 `zlib` 直接吃 `.tar.gz`。需处理 GNU `'L'` 长名与 PAX `'x'/'g'` 扩展头；
+符号链接在鸿蒙沙箱通常建不了，跳过即可。
+
+### 另一个静默失败：`import.meta.main`
+
+若入口是包 CLI，其最后一行常为 `if (import.meta.main) runCli()`。
+用 **`import()`** 加载时该值**恒为 `false`** ⇒ `runCli()` 永不执行 ⇒
+表现为"入口已加载"之后进程立刻退出、**无任何报错**。
+对策：显式调用入口导出的 `runCli()`（或 `main()`），并把 `process.argv` 摆成它期望的形状。
+
+---
+
+## 5. 构建与打包
+
+### 5.1 `compressNativeLibs` 必须写在 `module.json5` 的 module 级
+
+写进 `build-profile.json5` 的 `buildOption` / `buildOption.nativeLib` 都会被 schema 拒绝，
+而 **schema 只报"哪个键不对"，不报"该写到哪"**。
+
+```json5
+// entry/src/main/module.json5
+{ "module": { "compressNativeLibs": true, "extractNativeLibs": true } }
+```
+
+实测效果：
+
+| 条目 | 压缩前 | 压缩后 |
+|---|---|---|
+| `libnode.so` | 120.9 MB | **43.0 MB**（DEFLATE，压到 1/2.8） |
+| `libc++_shared.so` | 1.2 MB | 0.4 MB |
+| **HAP 总大小** | **151.6 MB** | **71.8 MB** |
+
+验证必须**查 HAP 而非只看大小**：读 zip 中央目录，`libnode.so` 的 `compress_type`
+应为 `8`（DEFLATE）而不是 `0`（STORED）。
+
+**方法论**：遇到 `Schema validate failed`，去
+`toolchains/configcheck/configSchema_rich.json` 或 `toolchains/modulecheck/module.json`
+里**搜该键，看它出现在哪个对象下**。
+
+### 5.2 native 产物必须落到 `entry/libs/<abi>/`
+
+```cmake
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../libs/${OHOS_ARCH})
+```
+
+不设它，产物落在 `build/` 下，HAP 里便**没有 `libs/` 目录** —— 表现为"装上但功能不通"。
+
+### 5.3 `.so` 签名
+
+鸿蒙商用版对 ELF 做**代码签名校验**，没有 `.codesign` section 直接不可用。
+用 `binary-sign-tool sign --selfSign 1`，**注意要在 `strip` 之后签**。
+
+### 5.4 两个"别浪费时间"的结论
+
+- `llvm-strip` 对 Node 官方产物**收益为 0**（已预 strip）。
+- hvigor 会排除**点文件**（11419 → 11337 个），全部是 `.history` / `.github` / `.npmignore`
+  之类 —— **合理行为**。但核对时要直接查 HAP，不要只看磁盘。
+
+---
+
+## 6. 观测：开发期最大的敌人是"看不见"
+
+**沙箱内的日志文件，连 debug 签名的应用也不让 `hdc` 读**（`permission denied`）。
+
+四条通道：
+
+| 通道 | 命令 |
+|---|---|
+| 看屏幕 | `hdc shell snapshot_display -f /data/local/tmp/s.jpeg` + `hdc file recv` |
+| 点屏幕 | `hdc shell uitest uiInput click <x> <y>` |
+| 日志回传 | `hdc rport tcp:19999` + 端上 POST 到 `127.0.0.1:19999` |
+| 端到端 | `hdc fport tcp:15577 tcp:5577` + `curl` |
+
+**三个"假信号"**：
+
+1. **hilog 里没有你的日志 ≠ 代码没执行**（应用侧 INFO 常不进 dump 缓冲）
+2. **`VmSize` 很大 ≠ V8 起来了**（ArkTS/ArkWeb 自己就占约 40 GB 虚拟地址空间）
+3. **点击"看起来生效了" ≠ 生效** —— 判据是**前后两次 `dumpLayout` 的差异**
+
+---
+
+## 7. 判据表：别用"看起来能用"当判据
+
+| 判据 | ❌ 会被骗 | ✅ 应该这样验 |
+|---|---|---|
+| 文件存在 | `existsSync('/bin/sh')` → true，但不可执行 | **执行一下**看 `EACCES` |
+| 路径可用 | `accessSync` 对 0 字节文件也返回 true | 判 `isFile() && size > 阈值` |
+| API 可用 | 声明文件里有 = 存在 ≠ 可用 | **真机调一次**（801 的教训） |
+| 写入成功 | 写完了，但读的人读不到 | **让最终使用者去读一遍**（谁写谁读） |
+| 压缩生效 | HAP 变小了 | **读 zip 中央目录**看 `compress_type` |
+| 输入正确 | "已输入 30 个字符" | **截图看实际落了什么字** |
+
+**共同点**：**"能构建 / 能写入 / 能返回"都不等于"能运行 / 能读取 / 能用"。**
+
+---
+
+## 8. 配套工具与验证
+
+- **ohos-node-doctor**（https://github.com/lzzhij/ohos-node-doctor）：
+  零依赖本机体检工具，纯 JS 自行解析 ELF，逐项检查上述硬约束并给出修法。
+  自检 18 条断言；CI 在 Node 18/20/22 × Ubuntu/Windows 上 6/6 通过。
+  用法：`node ohos-node-doctor.mjs <你的鸿蒙工程>`（有 FAIL 时退出码为 1）。
+- **症状索引**（symptoms.json，22 条）：精确报错 / 真因 / 修法 / 验证 / 证据强度。
+- **排障总表**（TROUBLESHOOTING.md）：按报错原文组织的六类问题。
+
+## 9. 只有单侧证据的结论（如实标注）
+
+| 结论 | 缺什么 |
+|---|---|
+| "打进签名 HAP 内的 `.so` 可以 `dlopen`" | **缺对照实验**：同一 `.so` 在 App 内 vs 普通 shell 内的加载结果对比 |
+| "Electron 下 `--expose-internals` 可用" | 结论来自非 Electron 宿主，Electron 场景**未验证** |
+| `.so` 签名（`.codesign`）的确切要求 | 来自官方文档与其他项目记录，**非本机实测** |
