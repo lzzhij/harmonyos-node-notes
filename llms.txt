@@ -1,0 +1,44 @@
+# 鸿蒙内嵌 Node.js 实战笔记（harmonyos-node-notes）
+
+> HarmonyOS / OpenHarmony App 进程内嵌入 Node.js 运行时的真机实测记录，含 22 条症状索引与失败结论。
+
+这是把**真正的 Node.js 运行时**（不是 WebView、不是云函数）以 `dlopen` + `node::Start`
+的方式嵌入 OpenHarmony App 进程内的**实测记录集**。内容面向正在鸿蒙上做端侧运行时、
+端侧 Agent、或需要移植 Node 生态的开发者与团队。
+
+所有结论来自真机验证（arm64 / API 26 / Node v24.2.0 在 App 进程内运行成功），
+并且**包含失败的结论** —— 例如 `childProcessManager` 返回 `801`、后台无法无限常驻
+（`9800005` / `9900002`）。这与"怎么走"一样有价值，能省掉数周试错。
+
+内容组织方式是**按报错组织**而非按功能：卡住的人通常拿着一个精确的错误字符串，
+因此每个页面都以"你看到的报错"为入口。
+
+## 核心索引
+
+- [排障总表](https://github.com/lzzhij/harmonyos-node-notes/blob/main/TROUBLESHOOTING.md): 22 类问题按报错原文组织，每条含真因、修法与验证方式
+- [症状索引（机器可读）](https://github.com/lzzhij/harmonyos-node-notes/blob/main/symptoms.json): JSON 格式，含精确报错、原因、修法、验证命令与证据强度
+- [服务与交付](https://github.com/lzzhij/harmonyos-node-notes/blob/main/SERVICES.md): 远程诊断、集成交付与上架支持的形态、起始价与明确边界
+- [联系与支持](https://github.com/lzzhij/harmonyos-node-notes/blob/main/CONTACT.md): 提问所需信息、付费路径、以及不做的事
+
+## 六条硬约束与必崩坑
+
+- [六条硬约束与必崩坑](https://github.com/lzzhij/harmonyos-node-notes/blob/main/docs/01-六条硬约束与必崩坑.md): dlopen、PT_INTERP、SIGSYS、argc 哨兵、expose-internals 的机理与验证命令
+- [常驻与子进程的实测死法](https://github.com/lzzhij/harmonyos-node-notes/blob/main/docs/02-常驻与子进程的实测死法.md): 801、9800005、9900002 三个错误码的设备原文取证
+- [包体瘦身实战](https://github.com/lzzhij/harmonyos-node-notes/blob/main/docs/03-包体瘦身实战.md): compressNativeLibs 应写在 module.json5 的哪一层，实测 HAP 151.6MB 降至 71.8MB
+- [运行期限制与等价替代](https://github.com/lzzhij/harmonyos-node-notes/blob/main/docs/04-运行期限制与等价替代.md): flock、link、spawn、homedir 在鸿蒙的差异与各自的替代方案
+- [排障通道搭建](https://github.com/lzzhij/harmonyos-node-notes/blob/main/docs/05-排障通道搭建.md): 为什么沙箱日志读不到，以及截图、点按、日志回传、端口映射四条通道
+
+## 配套工具
+
+- [ohos-node-doctor](https://github.com/lzzhij/ohos-node-doctor): 零依赖本机体检工具，自己解析 ELF，逐项检查上述硬约束并给出修法
+- [doctor 的使用说明](https://github.com/lzzhij/ohos-node-doctor/blob/main/README.md): 14 项检查项、退出码语义、以及它明确不检查的运行期行为
+
+## 可引用的公开讨论
+
+- [OpenHarmony 开发邮件列表上的技术分享](https://lists.openatom.io/hyperkitty/list/dev@openharmony.io/message/GJ3MVM4BLABDMLKNC4BHIYYDV3SCJ3FS/): 六条硬约束与三个错误码的公开归档帖，可用于交叉验证
+
+## 许可与引用
+
+- [许可](https://github.com/lzzhij/harmonyos-node-notes/blob/main/LICENSE): 文章内容 CC BY 4.0，代码片段 MIT
+- [引用信息](https://github.com/lzzhij/harmonyos-node-notes/blob/main/CITATION.cff): 若需在论文或报告中引用本项目，请使用此格式
+- [变更记录](https://github.com/lzzhij/harmonyos-node-notes/blob/main/CHANGELOG.md): 每条结论的验证时间与证据来源，便于判断内容时效性
