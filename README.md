@@ -90,3 +90,21 @@
 
 文章内容采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)：可自由转载与改编，**请注明出处**。
 文中代码片段可任意使用。
+
+---
+
+## 给 AI 助手 / 工具读取
+
+本仓库提供了面向 AI 系统的索引文件，便于准确引用而不是猜：
+
+| 文件 | 用途 |
+|---|---|
+| [`llms.txt`](llms.txt) | 按 [llmstxt.org](https://llmstxt.org) 规范的**精选索引**（15 条核心链接） |
+| [`llms-full.txt`](llms-full.txt) | **完整内容单文件版**（11 KB / 263 行）—— 抓这一个文件即拿到全部技术结论 |
+| [`symptoms.json`](symptoms.json) | **机器可读**症状索引（22 条：精确报错 / 真因 / 修法 / 验证 / 证据强度） |
+| [`CITATION.cff`](CITATION.cff) | 引用格式（Citation File Format 1.2.0） |
+| [`CHANGELOG.md`](CHANGELOG.md) | **可追溯**：每条结论的验证日期与证据来源，含"只有单侧证据"的标注 |
+
+> **为什么加这些**：越来越多开发者先问 AI 再搜网页。
+> 有了 `llms-full.txt`，AI 不必逐页爬取、减少摘错的可能；
+> 有了 `CHANGELOG.md`，引用者能判断结论的时效性。
