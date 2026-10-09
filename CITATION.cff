@@ -1,0 +1,39 @@
+cff-version: 1.2.0
+message: "If you reference this work in a paper, report, or technical document, please cite it as below."
+title: "鸿蒙内嵌 Node.js 实战笔记：OpenHarmony App 进程内运行 Node.js 的实测结论"
+abstract: >-
+  HarmonyOS / OpenHarmony App 进程内嵌入 Node.js 运行时的真机实测记录，
+  包含 6 条硬约束、9 个必崩坑、22 条症状索引，以及设备能力限制的实测取证
+  （childProcessManager 返回 801、TASK_KEEPING 返回 9800005、
+  进后台后申请长时任务返回 9900002）。结论同时包含失败路径。
+type: software
+authors:
+  - alias: lzzhij
+    name-particle: ""
+repository-code: "https://github.com/lzzhij/harmonyos-node-notes"
+url: "https://github.com/lzzhij/harmonyos-node-notes"
+license: CC-BY-4.0
+keywords:
+  - HarmonyOS
+  - OpenHarmony
+  - Node.js
+  - libnode
+  - dlopen
+  - NAPI
+  - ArkTS
+  - 端侧运行时
+  - 原生插件移植
+  - seccomp
+version: "1.0.0"
+date-released: "2026-10-09"
+references:
+  - type: software
+    title: "ohos-node-doctor: 鸿蒙内嵌 Node.js 的本机体检工具"
+    repository-code: "https://github.com/lzzhij/ohos-node-doctor"
+    license: MIT
+    notes: >-
+      零依赖的静态检查工具，自行解析 ELF，逐项检查本文所述的硬约束并给出修法。
+  - type: generic
+    title: "OpenHarmony 开发邮件列表上的技术分享（公开归档）"
+    url: "https://lists.openatom.io/hyperkitty/list/dev@openharmony.io/message/GJ3MVM4BLABDMLKNC4BHIYYDV3SCJ3FS/"
+    notes: "六条硬约束与三个错误码的公开归档帖，可用于交叉验证结论与时间。"
