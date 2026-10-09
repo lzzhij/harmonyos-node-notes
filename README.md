@@ -67,6 +67,17 @@
 
 ---
 
+## 卡住了？
+
+**先试免费的**：跑一遍 [ohos-node-doctor](https://github.com/lzzhij/ohos-node-doctor)，
+再对照上面的「症状速查表」—— 大部分问题这两步就能解决。
+
+**还不行就开 [issue](https://github.com/lzzhij/harmonyos-node-notes/issues)**
+（公开提问，回答对后来者也有价值），或看 **[联系与付费支持 →](CONTACT.md)**。
+
+> 提问请附**症状原文**（错误码/崩溃栈/日志）与三个 `llvm-readelf` 命令的输出。
+> 本项目最贵的两个坑都是靠**原始输出**一眼看出来的 —— 给原始输出能省三轮来回。
+
 ## 许可
 
 文章内容采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)：可自由转载与改编，**请注明出处**。
